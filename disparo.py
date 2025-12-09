@@ -1,3 +1,4 @@
+import os
 import pandas as pd
 import requests
 import time
@@ -7,17 +8,13 @@ from flask import Flask, request, jsonify
 from openai import OpenAI
 
 # =========================================
-# SUAS CREDENCIAIS Z-API
+# VARIÁVEIS DE AMBIENTE DO RAILWAY
 # =========================================
-INSTANCE_ID = "3EA077E8C556E2C95928125C10E1032C"
-TOKEN = "4E2735B960C80DBBBF160A78"
-CLIENT_TOKEN = "F138024f30a2a4169a0b36e2f82efb534S"
-OPENAI_API_KEY = "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"
-
-# =========================================
-# ADMINISTRADOR
-# =========================================
-ADMIN = "5511968907451"
+INSTANCE_ID = os.getenv("INSTANCE_ID")
+TOKEN = os.getenv("TOKEN")
+CLIENT_TOKEN = os.getenv("CLIENT_TOKEN")
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+ADMIN = os.getenv("ADMIN")
 
 # =========================================
 # CONFIGURAÇÕES
@@ -103,26 +100,20 @@ def webhook():
     if numero != ADMIN:
         return jsonify({"status": "ignorado"}), 200
 
-    # -------------------------
-    # LER MENSAGEM DE TEXTO
-    # -------------------------
+    # Ler mensagem
     texto = None
     if isinstance(data.get("text"), dict):
         texto = data["text"].get("message")
     elif isinstance(data.get("message"), str):
         texto = data["message"]
 
-    # -------------------------
-    # /mensagem — Define texto base
-    # -------------------------
+    # /mensagem
     if texto and texto.startswith("/mensagem"):
         TEXTO_ATUAL = texto.replace("/mensagem", "").strip()
         enviar_texto(ADMIN, f"📝 Mensagem definida:\n{TEXTO_ATUAL}")
         return jsonify({"ok": True})
 
-    # -------------------------
-    # /enviar — Disparo somente texto
-    # -------------------------
+    # /enviar
     if texto and texto.startswith("/enviar"):
 
         if not TEXTO_ATUAL:
@@ -142,10 +133,11 @@ def webhook():
 
 
 # =========================================
-# START SERVER
+# START SERVER — PORTA DO RAILWAY
 # =========================================
 
 if __name__ == "__main__":
-    print("🔥 SERVIDOR RODANDO NA PORTA 8080")
+    port = int(os.getenv("PORT", 8080))
+    print(f"🔥 SERVIDOR RODANDO NA PORTA {port}")
     print("Comandos: /mensagem, /enviar")
-    app.run(host="0.0.0.0", port=8080)
+    app.run(host="0.0.0.0", port=port)
