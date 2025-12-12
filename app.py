@@ -1,48 +1,53 @@
 import os
 import pandas as pd
-import requests
+import threading
 import time
 import random
-import threading
+import requests
 from flask import Flask, request, jsonify
-from openai import OpenAI
 
-# =========================================
-# VARIÁVEIS DE AMBIENTE (RENDER)
-# =========================================
+# ===============================
+# CONFIGURAÇÕES
+# ===============================
+
+PLANILHA_PATH = "conversas_whatsapp_unificadas.xlsx"
+
+INTERVALO_MIN = 15
+INTERVALO_MAX = 20
+
 INSTANCE_ID = os.getenv("INSTANCE_ID")
 TOKEN = os.getenv("TOKEN")
 CLIENT_TOKEN = os.getenv("CLIENT_TOKEN")
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-ADMIN = os.getenv("ADMIN")
+ADMIN = os.getenv("ADMIN")  # ex: 5511999999999
 
-# =========================================
-# CONFIGURAÇÕES
-# =========================================
-TEMPO_MIN = 20
-TEMPO_MAX = 60
-PLANILHA = "conversas_whatsapp_unificadas.xlsx"
+app = Flask(__name__)
 
-TEXTO_ATUAL = None
-DISPARO_ATIVO = False
-DISPARO_PAUSADO = False
+# ===============================
+# ESTADO GLOBAL
+# ===============================
 
-# =========================================
-# FUNÇÕES DE PLANILHA
-# =========================================
+disparo_ativo = False
+disparo_pausado = False
+thread_disparo = None
 
-def carregar_planilha():
-    if not os.path.exists(PLANILHA):
-        df = pd.DataFrame(columns=["Telefone", "Nome", "Status"])
-        df.to_excel(PLANILHA, index=False)
-    return pd.read_excel(PLANILHA)
+# ===============================
+# PLANILHA
+# ===============================
 
-def salvar_planilha(df):
-    df.to_excel(PLANILHA, index=False)
+def carregar_df():
+    if not os.path.exists(PLANILHA_PATH):
+        df = pd.DataFrame(columns=["numero", "nome", "status"])
+        df.to_excel(PLANILHA_PATH, index=False)
+        return df
+    return pd.read_excel(PLANILHA_PATH, dtype=str)
 
-# =========================================
-# Z-API
-# =========================================
+
+def salvar_df(df):
+    df.to_excel(PLANILHA_PATH, index=False)
+
+# ===============================
+# WHATSAPP
+# ===============================
 
 def enviar_texto(numero, mensagem):
     url = f"https://api.z-api.io/instances/{INSTANCE_ID}/token/{TOKEN}/send-text"
@@ -50,163 +55,146 @@ def enviar_texto(numero, mensagem):
         "Client-Token": CLIENT_TOKEN,
         "Content-Type": "application/json"
     }
-    payload = {"phone": numero, "message": mensagem}
-    return requests.post(url, json=payload, headers=headers).json()
+    payload = {
+        "phone": numero,
+        "message": mensagem
+    }
+    requests.post(url, json=payload, headers=headers)
 
-def gerar_variacao(mensagem):
-    client = OpenAI(api_key=OPENAI_API_KEY)
-    prompt = f"Crie uma variação natural mantendo o mesmo sentido: '{mensagem}'"
-
-    resposta = client.chat.completions.create(
-        model="gpt-4o-mini",
-        messages=[{"role": "user", "content": prompt}]
-    )
-    return resposta.choices[0].message.content
-
-# =========================================
+# ===============================
 # DISPARO
-# =========================================
+# ===============================
 
 def executar_disparo():
-    global DISPARO_ATIVO, DISPARO_PAUSADO
+    global disparo_ativo, disparo_pausado
 
-    DISPARO_ATIVO = True
-    DISPARO_PAUSADO = False
+    while disparo_ativo:
+        if disparo_pausado:
+            time.sleep(5)
+            continue
 
-    df = carregar_planilha()
+        df = carregar_df()
+        pendentes = df[df["status"] != "enviado"]
 
-    contatos = df[
-        (df["Telefone"].astype(str).str.startswith("55")) &
-        (~df["Telefone"].astype(str).str.contains("group", na=False)) &
-        (df["Status"] != "ENVIADO")
-    ]
+        if pendentes.empty:
+            disparo_ativo = False
 
-    contatos = contatos.sample(frac=1).reset_index(drop=True)
+            # 🔔 AVISA ADMIN QUE FINALIZOU
+            enviar_texto(
+                ADMIN,
+                "✅ *Disparo finalizado!*\n\n"
+                "Todos os contatos da planilha já receberam mensagem."
+            )
+            return
 
-    total = len(contatos)
-    enviados = 0
+        contato = pendentes.sample(1).iloc[0]
+        numero = contato["numero"]
 
-    for _, row in contatos.iterrows():
+        enviar_texto(
+            numero,
+            "🍕 Hoje é dia de pizza! Aproveita nossas promoções e chama a gente aqui 😍"
+        )
 
-        if DISPARO_PAUSADO:
-            enviar_texto(ADMIN, "⏸ Disparo pausado.")
-            break
+        df.loc[df["numero"] == numero, "status"] = "enviado"
+        salvar_df(df)
 
-        numero = str(row["Telefone"])
-        nome = str(row["Nome"]) if pd.notna(row["Nome"]) else ""
+        time.sleep(random.randint(INTERVALO_MIN, INTERVALO_MAX))
 
-        msg_base = TEXTO_ATUAL.replace("{nome}", nome)
-
-        try:
-            msg = gerar_variacao(msg_base)
-        except:
-            msg = msg_base
-
-        enviar_texto(numero, msg)
-
-        df.loc[df["Telefone"] == numero, "Status"] = "ENVIADO"
-        salvar_planilha(df)
-
-        enviados += 1
-        enviar_texto(ADMIN, f"📤 Enviado {enviados}/{total}")
-
-        time.sleep(random.randint(TEMPO_MIN, TEMPO_MAX))
-
-    DISPARO_ATIVO = False
-
-    if not DISPARO_PAUSADO:
-        enviar_texto(ADMIN, "🔥 Disparo finalizado.")
-
-# =========================================
-# FLASK
-# =========================================
-
-app = Flask(__name__)
+# ===============================
+# WEBHOOK
+# ===============================
 
 @app.route("/webhook", methods=["POST"])
 def webhook():
-    global TEXTO_ATUAL, DISPARO_PAUSADO
+    global disparo_ativo, disparo_pausado, thread_disparo
 
-    data = request.json
+    data = request.json or {}
+
     numero = data.get("phone")
+    nome = data.get("senderName", "")
+    texto = data.get("text", "").strip().lower()
 
-    texto = None
-    if isinstance(data.get("text"), dict):
-        texto = data["text"].get("message")
-    elif isinstance(data.get("message"), str):
-        texto = data["message"]
+    if not numero:
+        return jsonify({"ok": True})
 
-    # =====================================
-    # SALVAR CONTATO AUTOMÁTICO
-    # =====================================
-    if numero and numero != ADMIN:
-        df = carregar_planilha()
-        if numero not in df["Telefone"].astype(str).values:
-            nome = data.get("senderName", "")
-            df.loc[len(df)] = [numero, nome, ""]
-            salvar_planilha(df)
+    df = carregar_df()
 
-    # =====================================
-    # COMANDOS ADMIN
-    # =====================================
+    # Salva contato novo
+    if numero not in df["numero"].values:
+        df.loc[len(df)] = {
+            "numero": numero,
+            "nome": nome,
+            "status": "novo"
+        }
+        salvar_df(df)
+
+    # Apenas ADMIN pode usar comandos
     if numero != ADMIN:
         return jsonify({"ok": True})
 
+    # ===============================
+    # COMANDOS
+    # ===============================
+
     if texto == "/ajuda":
-        ajuda = (
-            "📌 *COMANDOS DISPONÍVEIS*\n\n"
-            "/mensagem <texto> → Define a mensagem do disparo\n"
-            "/enviar → Inicia o disparo\n"
-            "/pausar → Pausa o disparo\n"
-            "/continuar → Continua de onde parou\n"
-            "/status → Mostra o status atual\n"
-            "/ajuda → Lista todos os comandos\n\n"
-            "ℹ Use {nome} para personalizar a mensagem."
+        enviar_texto(
+            numero,
+            "📋 *Comandos disponíveis:*\n\n"
+            "/iniciar – Inicia o disparo\n"
+            "/pausar – Pausa o disparo\n"
+            "/retomar – Retoma o disparo\n"
+            "/status – Status atual\n"
+            "/ajuda – Lista comandos"
         )
-        enviar_texto(ADMIN, ajuda)
-        return jsonify({"ok": True})
 
-    if texto.startswith("/mensagem"):
-        TEXTO_ATUAL = texto.replace("/mensagem", "").strip()
-        enviar_texto(ADMIN, "📝 Mensagem definida.")
-        return jsonify({"ok": True})
+    elif texto == "/iniciar":
+        if not disparo_ativo:
+            disparo_ativo = True
+            disparo_pausado = False
+            thread_disparo = threading.Thread(target=executar_disparo, daemon=True)
+            thread_disparo.start()
+            enviar_texto(numero, "✅ Disparo iniciado.")
+        else:
+            enviar_texto(numero, "⚠️ O disparo já está ativo.")
 
-    if texto == "/enviar":
-        if not TEXTO_ATUAL:
-            enviar_texto(ADMIN, "⚠ Defina a mensagem antes.")
-            return jsonify({"ok": True})
+    elif texto == "/pausar":
+        disparo_pausado = True
+        enviar_texto(numero, "⏸️ Disparo pausado.")
 
-        threading.Thread(target=executar_disparo, daemon=True).start()
-        enviar_texto(ADMIN, "🚀 Disparo iniciado.")
-        return jsonify({"ok": True})
+    elif texto == "/retomar":
+        if disparo_ativo:
+            disparo_pausado = False
+            enviar_texto(numero, "▶️ Disparo retomado.")
+        else:
+            enviar_texto(numero, "⚠️ Nenhum disparo ativo.")
 
-    if texto == "/pausar":
-        DISPARO_PAUSADO = True
-        enviar_texto(ADMIN, "⏸ Pausando disparo...")
-        return jsonify({"ok": True})
+    elif texto == "/status":
+        enviados = len(df[df["status"] == "enviado"])
+        total = len(df)
 
-    if texto == "/continuar":
-        if not DISPARO_ATIVO:
-            threading.Thread(target=executar_disparo, daemon=True).start()
-            enviar_texto(ADMIN, "▶ Retomando disparo.")
-        return jsonify({"ok": True})
-
-    if texto == "/status":
-        status = (
-            "⏸ Pausado" if DISPARO_PAUSADO
-            else "▶ Rodando" if DISPARO_ATIVO
-            else "⏹ Parado"
+        enviar_texto(
+            numero,
+            f"📊 *Status do Disparo*\n\n"
+            f"Ativo: {'Sim' if disparo_ativo else 'Não'}\n"
+            f"Pausado: {'Sim' if disparo_pausado else 'Não'}\n"
+            f"Total contatos: {total}\n"
+            f"Enviados: {enviados}"
         )
-        enviar_texto(ADMIN, f"📊 Status do disparo: {status}")
-        return jsonify({"ok": True})
 
     return jsonify({"ok": True})
 
-# =========================================
+# ===============================
+# HEALTH CHECK
+# ===============================
+
+@app.route("/", methods=["GET"])
+def health():
+    return "OK", 200
+
+# ===============================
 # START
-# =========================================
+# ===============================
 
 if __name__ == "__main__":
-    port = int(os.getenv("PORT", 8080))
-    print(f"🔥 Servidor rodando na porta {port}")
+    port = int(os.environ.get("PORT", 10000))
     app.run(host="0.0.0.0", port=port)
