@@ -46,7 +46,7 @@ def salvar_df(df):
     df.to_excel(PLANILHA_PATH, index=False)
 
 # ===============================
-# WHATSAPP
+# WHATSAPP (Z-API)
 # ===============================
 
 def enviar_texto(numero, mensagem):
@@ -59,7 +59,7 @@ def enviar_texto(numero, mensagem):
         "phone": numero,
         "message": mensagem
     }
-    requests.post(url, json=payload, headers=headers)
+    requests.post(url, json=payload, headers=headers, timeout=15)
 
 # ===============================
 # DISPARO
@@ -101,6 +101,22 @@ def executar_disparo():
         time.sleep(random.randint(INTERVALO_MIN, INTERVALO_MAX))
 
 # ===============================
+# FUNÇÃO SEGURA PARA TEXTO
+# ===============================
+
+def extrair_texto(data):
+    texto = data.get("text", "")
+
+    # Caso venha como objeto
+    if isinstance(texto, dict):
+        texto = texto.get("message", "")
+
+    if isinstance(texto, str):
+        return texto.strip().lower()
+
+    return ""
+
+# ===============================
 # WEBHOOK
 # ===============================
 
@@ -112,7 +128,8 @@ def webhook():
 
     numero = data.get("phone")
     nome = data.get("senderName", "")
-    texto = data.get("text", "").strip().lower()
+
+    texto = extrair_texto(data)
 
     if not numero:
         return jsonify({"ok": True})
@@ -151,7 +168,9 @@ def webhook():
         if not disparo_ativo:
             disparo_ativo = True
             disparo_pausado = False
-            thread_disparo = threading.Thread(target=executar_disparo, daemon=True)
+            thread_disparo = threading.Thread(
+                target=executar_disparo, daemon=True
+            )
             thread_disparo.start()
             enviar_texto(numero, "✅ Disparo iniciado.")
         else:
