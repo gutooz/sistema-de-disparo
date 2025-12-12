@@ -1,4 +1,6 @@
 flask
-pandas
-openai
 requests
+openai
+pandas
+gunicorn
+openpyxl
