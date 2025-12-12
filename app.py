@@ -20,6 +20,8 @@ TOKEN = os.getenv("TOKEN")
 CLIENT_TOKEN = os.getenv("CLIENT_TOKEN")
 ADMIN = os.getenv("ADMIN")  # ex: 5511999999999
 
+COLUNAS_PADRAO = ["numero", "nome", "status"]
+
 app = Flask(__name__)
 
 # ===============================
@@ -31,22 +33,34 @@ disparo_pausado = False
 thread_disparo = None
 
 # ===============================
-# PLANILHA
+# PLANILHA (BLINDADA)
 # ===============================
 
 def carregar_df():
+    # Se não existir, cria corretamente
     if not os.path.exists(PLANILHA_PATH):
-        df = pd.DataFrame(columns=["numero", "nome", "status"])
+        df = pd.DataFrame(columns=COLUNAS_PADRAO)
         df.to_excel(PLANILHA_PATH, index=False)
         return df
-    return pd.read_excel(PLANILHA_PATH, dtype=str)
+
+    df = pd.read_excel(PLANILHA_PATH, dtype=str)
+
+    # 🔐 GARANTE COLUNAS
+    for coluna in COLUNAS_PADRAO:
+        if coluna not in df.columns:
+            df[coluna] = ""
+
+    # Reordena e remove lixo
+    df = df[COLUNAS_PADRAO]
+
+    return df
 
 
 def salvar_df(df):
     df.to_excel(PLANILHA_PATH, index=False)
 
 # ===============================
-# WHATSAPP (Z-API)
+# WHATSAPP
 # ===============================
 
 def enviar_texto(numero, mensagem):
@@ -78,8 +92,6 @@ def executar_disparo():
 
         if pendentes.empty:
             disparo_ativo = False
-
-            # 🔔 AVISA ADMIN QUE FINALIZOU
             enviar_texto(
                 ADMIN,
                 "✅ *Disparo finalizado!*\n\n"
@@ -101,13 +113,12 @@ def executar_disparo():
         time.sleep(random.randint(INTERVALO_MIN, INTERVALO_MAX))
 
 # ===============================
-# FUNÇÃO SEGURA PARA TEXTO
+# TEXTO SEGURO
 # ===============================
 
 def extrair_texto(data):
     texto = data.get("text", "")
 
-    # Caso venha como objeto
     if isinstance(texto, dict):
         texto = texto.get("message", "")
 
@@ -128,7 +139,6 @@ def webhook():
 
     numero = data.get("phone")
     nome = data.get("senderName", "")
-
     texto = extrair_texto(data)
 
     if not numero:
@@ -136,8 +146,8 @@ def webhook():
 
     df = carregar_df()
 
-    # Salva contato novo
-    if numero not in df["numero"].values:
+    # Salva contato novo (sem duplicar)
+    if numero not in df["numero"].astype(str).values:
         df.loc[len(df)] = {
             "numero": numero,
             "nome": nome,
@@ -149,61 +159,39 @@ def webhook():
     if numero != ADMIN:
         return jsonify({"ok": True})
 
-    # ===============================
-    # COMANDOS
-    # ===============================
-
     if texto == "/ajuda":
         enviar_texto(
             numero,
             "📋 *Comandos disponíveis:*\n\n"
-            "/iniciar – Inicia o disparo\n"
-            "/pausar – Pausa o disparo\n"
-            "/retomar – Retoma o disparo\n"
-            "/status – Status atual\n"
-            "/ajuda – Lista comandos"
+            "/iniciar\n/pausar\n/retomar\n/status\n/ajuda"
         )
 
     elif texto == "/iniciar":
         if not disparo_ativo:
             disparo_ativo = True
             disparo_pausado = False
-            thread_disparo = threading.Thread(
-                target=executar_disparo, daemon=True
-            )
+            thread_disparo = threading.Thread(target=executar_disparo, daemon=True)
             thread_disparo.start()
             enviar_texto(numero, "✅ Disparo iniciado.")
-        else:
-            enviar_texto(numero, "⚠️ O disparo já está ativo.")
 
     elif texto == "/pausar":
         disparo_pausado = True
         enviar_texto(numero, "⏸️ Disparo pausado.")
 
     elif texto == "/retomar":
-        if disparo_ativo:
-            disparo_pausado = False
-            enviar_texto(numero, "▶️ Disparo retomado.")
-        else:
-            enviar_texto(numero, "⚠️ Nenhum disparo ativo.")
+        disparo_pausado = False
+        enviar_texto(numero, "▶️ Disparo retomado.")
 
     elif texto == "/status":
-        enviados = len(df[df["status"] == "enviado"])
-        total = len(df)
-
         enviar_texto(
             numero,
-            f"📊 *Status do Disparo*\n\n"
-            f"Ativo: {'Sim' if disparo_ativo else 'Não'}\n"
-            f"Pausado: {'Sim' if disparo_pausado else 'Não'}\n"
-            f"Total contatos: {total}\n"
-            f"Enviados: {enviados}"
+            f"📊 Status\nAtivo: {disparo_ativo}\nPausado: {disparo_pausado}\nTotal: {len(df)}"
         )
 
     return jsonify({"ok": True})
 
 # ===============================
-# HEALTH CHECK
+# HEALTH
 # ===============================
 
 @app.route("/", methods=["GET"])
